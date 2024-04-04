@@ -1,278 +1,426 @@
+
+from pymongo import MongoClient
 import streamlit as st
-import easyocr as oc
-from PIL import Image as im,ImageEnhance,ImageFilter
-import io
-import mysql.connector
+import pandas as pd
+import plotly.express as px
+import folium
+from streamlit_folium import folium_static
 
-# Change the connection value in the parameter and database name
-connection=mysql.connector.connect(host='localhost',user="root",password="berlin10",database="bizcard")
-mycursor=connection.cursor()
+#mg_connection will connect monodb cluster to access databases and collections
+mg_connection=MongoClient("mongodb://localhost:27017")
 
-# This function extracts text from a given image and returns two lists based on the width of the image.
-def reader_file(ab): 
-        image_path=("temp.jpg")     
-        reader=oc.Reader(['en'])
-        read_img = reader.readtext(image_path)
-        pil_img=im.open(image_path)
-        a=[]
-        b=[]
-        for x in read_img :  
-          if (x[0][0][0])<(pil_img.width/(2*ab))-((100)*ab):
-             a.append(x)
+mgdb=mg_connection["sample_airbnb"]
+mgcol=mgdb["listingsAndReviews"]
+
+#This function convert mongodb datas into pandas dataframe
+def convert_mgcol_pd():
+    datas=[]
+    for x in mgcol.find():
+      datas.append(x)
+    df=pd.DataFrame(datas)
+    df['bathrooms']=df['bathrooms'].apply(str).astype(float)
+    df['price']=df['price'].apply(str).astype(float)
+    df['security_deposit']=df['security_deposit'].apply(str).astype(float)
+    df['cleaning_fee']=df['cleaning_fee'].apply(str).astype(float)
+    df['extra_people']=df['extra_people'].apply(str).astype(float)
+    df['guests_included']=df['guests_included'].apply(str).astype(int)
+    df['weekly_price']=df['weekly_price'].apply(str).astype(float)
+    df['monthly_price']=df['monthly_price'].apply(str).astype(float)
+    df['reviews']=df['reviews'].apply(tuple)
+    df['images']=df['images'].apply(tuple)
+    df['host']=df['host'].apply(tuple)
+    df['address']=df['address'].apply(tuple)
+    df['availability']=df['availability'].apply(tuple)
+    df['review_scores']=df['review_scores'].apply(tuple)
+    df['reviews']=df['reviews'].apply(lambda x:tuple(str(s) for s in x))
+    df['reviews']=df['reviews'].apply(lambda x:tuple(tuple(s) for s in x))
+    df['amenities']=df['amenities'].apply(tuple)
+    df['address']=df['address'].apply(str)
+    address=[]
+    for y in range(0,len(datas)):
+       row=datas[y]['address']
+       address.append(row)
+    df1=pd.DataFrame(address)
+    coordinates=[]
+    for z in range(0,len(datas)):
+       row=datas[z]['address']['location']['coordinates'] 
+       coordinates.append(row)
+    df2=pd.DataFrame(coordinates,columns=['longitude','latitude'])
+
+    reviews_score=[]
+    for a in range(0,len(datas)):
+       row=datas[a]["review_scores"]
+       reviews_score.append(row)
+    df3=pd.DataFrame(reviews_score,columns=['review_scores_accuracy',
+                                          'review_scores_cleanliness',
+                                          'review_scores_checkin',
+                                          'review_scores_communication',
+                                          'review_scores_location',
+                                          'review_scores_value',
+                                          'review_scores_rating'
+                                          ] )
+    avaliablity=[]
+    for b in range(0,len(datas)):
+       row=datas[b]['availability']
+       avaliablity.append(row)
+    df4=pd.DataFrame(avaliablity,columns=['availability_30',
+                                          'availability_60',
+                                          'availability_90',
+                                          'availability_365'
+                                          ] )
+
+    df=pd.concat([df,df1,df2,df3,df4],axis=1)
+
+    return df
+#This function analyse and drop unwanted columns in dataframe
+def droping(df):
+      df=df.drop('summary',axis=1)
+      df=df.drop('space',axis=1)
+      df=df.drop('neighborhood_overview',axis=1)
+      df=df.drop('notes',axis=1)
+      df=df.drop('transit',axis=1)
+      df=df.drop('first_review',axis=1)
+      df=df.drop('last_review',axis=1)
+      df=df.drop('reviews_per_month',axis=1)
+      df=df.drop('address',axis=1)
+      df=df.drop('location',axis=1)
+      df=df.dropna(subset=['availability_30','availability_60','availability_90','availability_365'])
+
+      return df
+
+#This function fill up the  nan values and delete small quantity of rows having nan value
+def del_add_values(df):
+    df=df[df['name']!='']
+    x=df['name'].duplicated()
+    df=df[x==False]
+    df['beds']=df['beds'].fillna(0.0)
+    df['bedrooms']=df['bedrooms'].fillna(0.0)
+    df['bathrooms']=df['bathrooms'].fillna(1.0)
+    df['weekly_price']=df['weekly_price'].fillna(7*df['price'])
+    df['monthly_price']=df['monthly_price'].fillna(30*df['price'])
+    df['cleaning_fee']=df['cleaning_fee'].fillna(df['cleaning_fee'].mean())
+    df['security_deposit']=df['security_deposit'].fillna(df['security_deposit'].mean())
+    df['name'] = df['name'].replace('{{ SAGRADA FAMILIA }} Center ROOM *****', 'SAGRADA FAMILIA- Center ROOM')
+    df=df.drop(["review_scores"],axis=1)
+    df['review_scores_accuracy']=df['review_scores_accuracy'].fillna(df['review_scores_accuracy'].mean())
+    df['review_scores_cleanliness']=df['review_scores_cleanliness'].fillna(df['review_scores_cleanliness'].mean())
+    df['review_scores_rating']=df['review_scores_rating'].fillna(df['review_scores_rating'].mean())
+    df['review_scores_value']=df['review_scores_value'].fillna(df['review_scores_value'].mean())
+
+    return df
+#This function  display a world map along with location of property in different country  and some details of property 
+def map(df,dp1,dp2a,dp2,dp3,op2):
+      try:
+
+          if 'select all country' in dp1:
+             df_li=list(df['country'].unique())
+
+             df1=df[df['country'].isin(df_li)].head(1000)
+
           else:
-            b.append(x)
-        if len(a)<=2:
-         a,b=b,a
-        return a,b
+            df1=df[df['country'].isin(dp1)]
+          if dp2a=="less than":
+            if dp2!="select all":
+               df1=df1[df1['price']<dp2]
+            else:
+               df1=df1
+          else:
+            if dp2!="select all":
+              df1=df1[df1['price']>dp2]
+            else:
+               df1=df1
+            
+          if dp2a=="less than":
+            if dp2!="select all":
+               df1=df1[df1['weekly_price']<dp2]
+            else:
+               df1=df1
+          else:
+            if dp2!="select all":
+              df1=df1[df1['weekly_price']>dp2]
+            else:
+               df1=df1
+          if dp2a=="less than":
+            if dp2!="select all":
+               df1=df1[df1['monthly_price']<dp2]
+            else:
+               df1=df1
+          else:
+            if dp2!="select all":
+              df1=df1[df1['monthly_price']>dp2]
+            else:
+               df1=df1
+          if dp2a=="less than":
+            if dp3!="select all":
+              df1=df1[df1['bedrooms']<dp3]
+            else:
+               df1=df1
+          else:
+            if dp3!="select all":
+                df1=df1[df1['bedrooms']>dp3]
+            else:
+               df1=df1
+          if "select all" in op2:
+             df1=df1
+          else:
+             df1=df1[df1['property_type']].isin(op2)
+          loc_center = [df1['latitude'].mean(), df1['longitude'].mean()]
+          map1 = folium.Map(location = loc_center, zoom_start = 0, control_scale=True)
+          for index, loc in df1.iterrows():
+              Tooltip =f"""Name: {loc['name']}<br>property type: {loc['property_type']}<br>room type: {loc['room_type']}
+                                         <br>Bedroom: {loc['bedrooms']}<br>Street: {loc['street']}
+                       <br>Country: {loc['country']}<br>No of review: {loc['number_of_reviews']}<br>Rating: {loc['review_scores_rating']}
+                     <br>Daily price: {loc['price']}<br>weekly price: {loc['weekly_price']} <br>monthly price: {loc['monthly_price']} 
+                    <br>security deposit: {loc['security_deposit']}<br>cleaning fees: {loc['cleaning_fee']}
+                    <br>minimum_nights: {loc['minimum_nights']}<br>maximum_nights : {loc['maximum_nights']}
+                 """
+              folium.CircleMarker([loc['latitude'], loc['longitude']], tooltip=Tooltip, radius=2, weight=5, popup=loc['name']).add_to(map1)
+          folium.LayerControl().add_to(map1) 
+      except:
+          st.warning("In this country there are no more higher value ,please select lesser value")       
+          
+      return map1,df1  
 
-# This function returns a sharpened image based on a value provided by the user.
-def img_sharp(lef,sharp):
-    img_sh = ImageEnhance.Sharpness(lef)
-    en_img_sh = img_sh.enhance(sharp)
-    return en_img_sh
+#This function display different types of chart for Visualization of price
+def price_charts(df1,chart_type,X):
+   
+    if chart_type=='scatter chart':
+        if X=="season":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[a[0]*df1['price'].sum(),a[1]*df1['price'].sum(),a[2]*df1['price'].sum(),a[3]*df1['price'].sum()]
+          X=['30 days','60 days','90 days','365 days']
+        elif X=="Name":
+           X='name'
+           Y='price'
+        elif X=='property types':
+          X='property_type'
+          Y='price'
+        elif X=='country':
+          X='country'
+          Y='price'
+        fig1=px.scatter(
+          df1,
+          x=X,
+          y=Y,
+          title="Scatter plots chart"
+           )
+       
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
+    if chart_type=='pie chart':
+        if X=="season":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[(a[3]-a[0])*df1['price'].sum(),(a[3]-a[1])*df1['price'].sum(),(a[3]-a[2])*df1['price'].sum(),(a[3]-a[3])*df1['price'].sum()]
+          X=['30 days','60 days','90 days','365 days']
+        elif X=="Name":
+           X='name'
+           Y='price'
+        elif X=='property types':
+          X='property_type'
+          Y='price'
+        elif X=='country':
+          X='country'
+          Y='price'
+        fig1=px.pie(
+          df1,
+          values=Y,
+          names=X,
+          title="pie chart"
+           )
+       
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
 
-# This function returns a brightenimage based on a value provided by the user.
-def img_bright(en_img_sh,bright):
-      img_br = ImageEnhance.Brightness(en_img_sh)
-      en_img_br = img_br.enhance(bright) 
-      return en_img_br
+    if chart_type=='bar chart':
+        if X=="seasons":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[(a[3]-a[0])*df1['price'].sum(),(a[3]-a[1])*df1['price'].sum(),(a[3]-a[2])*df1['price'].sum(),(a[3]-a[3])*df1['price'].sum()]
+          X=['30 days','60 days','90 days','365 days']
+        elif X=="Name":
+           X='name'
+           Y='price'
+        elif X=='property types':
+          X='property_type'
+          Y='price'
+        elif X=='country':
+          X='country'
+          Y='price'
+        fig1=px.bar(
+          df1,
+          x=X,
+          y=Y,
+          title="Bar chart"
+           )
+       
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
+    if chart_type=='line chart':
+        if X=="season":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[(a[3]-a[0])*df1['price'].sum(),(a[3]-a[1])*df1['price'].sum(),(a[3]-a[2])*df1['price'].sum(),(a[3]-a[3])*df1['price'].sum()]
+          X=['365 days','90 days','60 days','30 days']
+        elif X=="Name":
+           X='name'
+           Y='price'
+        elif X=='property types':
+          X='property_type'
+          Y='price'
+        elif X=='country':
+          X='country'
+          Y='price'
+        fig1=px.line(
+          df1,
+          x=X,
+          y=Y,
+          title="line chart"
+           )
+       
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
 
-# This function returns a color intensity image based on a value provided by the user.
-def img_col_intensity(en_img_br,col_intensity):
-    img_col = ImageEnhance.Color(en_img_br)
-    en_img_in =img_col.enhance(col_intensity)
-    return en_img_in
+#This function display different types of chart for Visualization of availability
+def avail_chart(df1,chart_type,X):
+    if chart_type=='scatter chart':
+        if X=="demand fluctuation in %":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[(((a[1]-a[0])*100)/a[0]),(((a[2]-a[1])*100)/a[1]),(((a[3]-a[2])*100)/a[2])]
+          X=['30 days','60 days','90 days']
+        elif X=="occupancy rates in %":
+           X=['30 days','60 days','90 days']
+           a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+           Y=[(a[3]-a[0])/a[3],(a[3]-a[0])/a[3],(a[3]-a[0])/a[3]]
+        elif X=="avaliablity 30":
+           X='availability_30'
+           Y='price'
+        elif X=="avaliablity 60":
+           X='availability_60'
+           Y='price'
+        elif X=="avaliablity 90":
+           X='availability_90'
+           Y='price'
+        elif X=="avaliablity 365":
+           X='availability_365'
+           Y='price'
 
-# This function returns a sharpened image based on a value provided by the user.
-def img_smooth(en_img_in,smooth):
-    en_img_sm=en_img_in.filter(ImageFilter.GaussianBlur(radius=smooth))
-    return en_img_sm
+        fig1=px.scatter(
+          df1,
+          x=X,
+          y=Y,
+          title="Scatter plots chart"
+           )  
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
 
-# This function returns a contrast image based on a value provided by the user.
-def img_contrast(en_img_sm,contrast):
-    img_con = ImageEnhance.Contrast(en_img_sm)
-    en_img_con = img_con.enhance(contrast)
-    return en_img_con
+    if chart_type=='line chart':
+        if X=="demand fluctuation in %":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[(((a[1]-a[0])*100)/a[0]),(((a[2]-a[1])*100)/a[1]),(((a[3]-a[2])*100)/a[2])]
+          X=['30 days','60 days','90 days']
+        elif X=="occupancy rates in %":
+           X=['30 days','60 days','90 days']
+           a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+           Y=[(a[3]-a[0])/a[3],(a[3]-a[0])/a[3],(a[3]-a[0])/a[3]]
+        elif X=="avaliablity 30":
+           X='availability_30'
+           Y='price'
+        elif X=="avaliablity 60":
+           X='availability_60'
+           Y='price'
+        elif X=="avaliablity 90":
+           X='availability_90'
+           Y='price'
+        elif X=="avaliablity 365":
+           X='availability_365'
+           Y='price'
+        fig1=px.line(
+          df1,
+          x=X,
+          y=Y,
+          title="line chart"
+           )  
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
+    if chart_type=='bar chart':
+        if X=="demand fluctuation in %":
+          a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+          Y=[(((a[1]-a[0])*100)/a[0]),(((a[2]-a[1])*100)/a[1]),(((a[3]-a[2])*100)/a[2])]
+          X=['30 days','60 days','90 days']
+        elif X=="occupancy rates in %":
+           X=['30 days','60 days','90 days']
+           a=[df1['availability_30'].sum(),df1['availability_60'].sum(),df1['availability_90'].sum(),df1['availability_365'].sum()]
+           Y=[(a[3]-a[0])/a[3],(a[3]-a[0])/a[3],(a[3]-a[0])/a[3]]
+        elif X=="avaliablity 30":
+           X='availability_30'
+           Y='price'
 
-# This function returns a crop image based on a value provided by the user.
-def img_crop(result,lefts, to, righ, botto,ab,ba):
-   img=im.open(io.BytesIO(result))
-   img=img.resize((img.width*ab,img.height*ba))
-   widths=img.width
-   heights=img.height
-   left = (widths - widths+lefts-righ) // 2
-   top = (heights- heights+to) // 2
-   right =(widths+ widths-left-righ)  // 2
-   bottom = (heights + heights-botto) // 2
-
-   lef = img.crop((left, top, right, bottom))
-   return lef,left, top, right, bottom
-
-# This function returns the default value of a slider when the user clicks the default button0
-def reset_slider(key):
-    sharp=slider_place1.slider(label="Sharpness",min_value=-50.0,max_value=50.0,value=1.0,key=6+key) 
-    bright=slider_place2.slider(label="Brightness",min_value=-50.0,max_value=50.0,value=1.0,key=7+key)
-    col_intensity=slider_place3.slider(label="Color Intensity",min_value=-50.0,max_value=50.0, value=1.0,key=8+key)
-    smooth=slider_place4.slider(label="Smoothness",min_value=-2.0,max_value=2.0, value=0.0,key=9+key)
-    contrast=slider_place5.slider(label="Contrast",min_value=-50.0,max_value=50.0,value=1.0,key=10+key)
-    lef_cr=slider_place6.slider(label="Left crop",min_value=0,max_value=200,value=0,key=13+key)
-    top_cr=slider_place7.slider(label="Top crop",min_value=-0,max_value=200,value=0,key=14+key)
-    rig_cr=slider_place8.slider(label="Right crop",min_value=0,max_value=200,value=0,key=15+key)
-    bot_cr=slider_place9.slider(label="bottom crop",min_value=0,max_value=200,value=0,key=16+key)
-    return sharp,bright,col_intensity,smooth,contrast,lef_cr,top_cr,rig_cr,bot_cr
-
-#This function returns the default values from extracted data accoring to the widget 
-def valu(a,b,ab):
-     value1=a[0][1]
-     value2=a[1][1]
-     value3=[]
-     value4=[]
-     value5=[]
-     value6=[]
-     value7=[]
-     
-     for x in range(0,len(a)):
-        
-        kb=a[x][1].replace('-','').replace('+','')
-        kb1=a[x][1]
-        kb2=kb1[-6:]
-        if kb.isdigit() and len(kb)>7:
-           value3.append(a[x][1])
-        if kb.find('@')!=-1:
-           value4.append(a[x][1])
-        if kb.find('www')!=-1 or kb.find("ww")!=-1  or kb.find("WW")!=-1 :
-           value5.append(kb)
-        if kb.find('.com')!=-1 and  kb.find("@")==-1 or kb.find('.Com')!=-1 and  kb.find("@")==-1 :
-           value5.append(kb)
-        if kb2.isdigit() and len(kb2)==6:
-           c=a[x][0][1][1]
-           for y in range(0,len(a)):
-             if c-(12*ab)<a[y][0][3][1]<=c+(ab*12):   
-               value6.append(a[y][1])
-           value6.append(kb1)
-
-     for z in range(0,len(b)):
-        ka=b[z][1]
-        value7.append(ka)
-     if len(value5)==2:
-      if value5[0]==value5[1]:
-          value5=value5[0]
-     return value1,value2,value3,value4,value5,value6,value7
-
-#This function create a mysql table, if table is not there
-def tab_sql():
-    query1="show tables like '%biscard%'"
-    com=mycursor.execute(query1)
-    qresult=mycursor.fetchall()
-    if len(qresult)==0:
-       query2="""create table biscard_details(
-          Id int auto_increment primary key,
-          Name varchar(255),
-          Designation varchar(255),
-          mobile_1 varchar(255),
-          mobile_2 varchar(255),
-          Email varchar(255),
-          Website varchar(255),
-          Address varchar(500),
-         Company_Name varchar(255),
-         Original_Image longblob
-         
-                   )"""
-       mycursor.execute(query2)
-# This function saves the values in a MySQL table from a form when the submit button is clicked
-def save_sql(name,occu,phone1,phone2,mail,web_site,address,company_name,result):
-   name= st.session_state.value_1
-   occu=st.session_state.value_2
-   phone1=st.session_state.value_3
-   phone2=st.session_state.value_4
-   mail=st.session_state.value_5
-   web_site=st.session_state.value_6
-   address=st.session_state.value_7
-   company_name=st.session_state.value_8
-
-
-   query3="""insert into biscard_details(Name,Designation,mobile_1,mobile_2,Email,Website,Address,Company_Name,
-            Original_Image) values(%s, %s, %s, %s, %s, %s, %s, %s, %s)"""
-   val=(name, occu, phone1, phone2, mail, web_site, address, company_name, result)
-   com3=mycursor.execute(query3,val)
-   connection.commit()
-
-tab_sql()
-st.header("BizCardX: Extracting Business Card Data with OCR")
-up_file=st.file_uploader(label="Upload the image",type=['png', 'jpg','jpeg'] )
-
-co1,co2=st.columns(2)
-ab=co1.number_input(label="width",min_value=1,max_value=50,value=1)
-ba=co2.number_input(label="Height",min_value=1,max_value=50,value=1)
-de=st.button(label="Original Image")
-with st.sidebar: 
- slider_place1=st.empty()
- slider_place2=st.empty()
- slider_place3=st.empty()
- slider_place4=st.empty()
- slider_place5=st.empty()
- slider_place6=st.empty()
- slider_place7=st.empty()
- slider_place8=st.empty() 
- slider_place9=st.empty()
-
-if de==False:
- sharp=slider_place1.slider(label="Sharpness",min_value=-50.0,max_value=50.0,value=1.0,key=1) 
- bright=slider_place2.slider(label="Brightness",min_value=-50.0,max_value=50.0,value=1.0,key=2)
- col_intensity=slider_place3.slider(label="Color Intensity",min_value=-50.0,max_value=50.0, value=1.0,key=3)
- smooth=slider_place4.slider(label="Smoothness",min_value=-2.0,max_value=2.0, value=0.0,key=4)
- contrast=slider_place5.slider(label="Contrast",min_value=-50.0,max_value=50.0,value=1.0,key=5)
- lef_cr=slider_place6.slider(label="Left crop",min_value=0,max_value=200,value=0,key=13)
- top_cr=slider_place7.slider(label="Top crop",min_value=0,max_value=200,value=0,key=14)
- rig_cr=slider_place8.slider(label="Right crop",min_value=0,max_value=200,value=0,key=15)
- bot_cr=slider_place9.slider(label="bottom crop",min_value=0,max_value=200,value=0,key=16)
-if de==True:
-  sharp=1.0
-  bright=1.0
-  col_intensity=1.0
-  smooth=0.0
-  contrast=1.0
-  lef_cr=1.0
-  rig_cr=1.0
-  bot_cr=1.0
-  top_cr=1.0
-  key=+1
-  sharp,bright,col_intensity,smooth,contrast,lef_cr,top_cr,rig_cr,bot_cr=reset_slider(key)
-key_num=1
-click1=st.button(label="Extract TEXT")
-
-
-if 'value1' not in st.session_state:
-   st.session_state.value_1=None
-if 'value2' not in st.session_state:
-   st.session_state.value_2=None
-if 'value3' not in st.session_state:
-   st.session_state.value_3=None
-if 'value4' not in st.session_state:
-   st.session_state.value_4=None
-if 'value5' not in st.session_state:
-   st.session_state.value_5=None
-if 'value6' not in st.session_state:
-   st.session_state.value_6=None
-if 'value7' not in st.session_state:
-   st.session_state.value_7=None
-if 'value8' not in st.session_state:
-   st.session_state.value_8=None
+        elif X=="avaliablity 60":
+           X='availability_60'
+           Y='price'
+        elif X=="avaliablity 90":
+           X='availability_90'
+           Y='price'
+        elif X=="avaliablity 365":
+           X='availability_365'
+           Y='price'
+        fig1=px.bar(
+          df1,
+          x=X,
+          y=Y,
+          title="barchart"
+           )  
+        fig1.update_layout(hoverlabel_font_size=20,hoverlabel_font_family='Arial')
+        st.plotly_chart(fig1, theme="streamlit", use_container_width=True,height=1780) 
 
 
-if up_file!= None:
+st.title(":orange[Airbnb Analysis]")        
+df=convert_mgcol_pd()
+df=droping(df)
+df=del_add_values(df)
+option_dp1=list(df['country'].unique())
+option_dp1.insert(0,'select all country')
+co1, co2=st.columns(2)
+ch1=co1.checkbox(label="map1")
 
-  result=up_file.getvalue()
+dp1=co2.multiselect(label="select country",options=option_dp1)
+co1a, co2a=st.columns(2)
+dp2a=co1a.radio(label="select",options=["less than","more than"],horizontal=True)
+dp2b=co2a.radio(label="select",options=["Daily rent","weekly rent","monthly rent"],horizontal=True)
 
-  lef,left, top, right, bottom=img_crop(result,lef_cr,top_cr,rig_cr,bot_cr,ab,ba)
-  sh=img_sharp(lef,sharp) 
-  br=img_bright(sh,bright)
-  inten=img_col_intensity(br,col_intensity)
-  sm=img_smooth(inten,smooth)
-  con=img_contrast(sm,contrast)
-  st.image(con)
-  
+co3, co4,co10=st.columns(3)
+op2=list(df['property_type'].unique())
+op2.insert(0,'select all')
+if dp2b=="Daily rent":
+  dp2=co3.selectbox(label="select Daily rent ",options=["select all",500,1000,1500,2000,2500,3000,3500,4000,4500,5000])
+elif dp2b=="weekly rent":
+    dp2=co3.selectbox(label="select weekly rent ",options=["select all",5000,10000,15000,20000,25000,30000,35000])
+else:
+  dp2=co3.selectbox(label="select monthly rent ",options=["select all",5000,10000,15000,20000,25000,30000,35000,
+                                                    40000,50000,60000,70000,80000,90000,100000,20000,30000,35000       ])
+dp3=co4.selectbox(label="select bedrooms",options=["select all",0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20])
+dp4=co10.selectbox(label="property type",options=op2)
 
-  if click1==True and up_file!= None:
-    with st.spinner('please Wait' ): 
-     c=con.convert('RGB')
-     c.save('temp.jpg')         
-     a,b=reader_file(ab)
+try:
+   map1,df1=map(df,dp1,dp2a,dp2,dp3,op2)
+except :
+   st.write("") 
 
-  
-     value1,value2,value3,value4,value5,value6,value7=valu(a,b,ab)
-     value4="".join(value4)
-     value5="".join(value5)
-     value6=" ".join(value6)
-     value7=" ".join(value7)
-     st.session_state.value_1=value1
-     st.session_state.value_2=value2
-     if len(value3)==1:
-       st.session_state.value_3=value3[0]
-       st.session_state.value_4="NA"
-     else:
-       st.session_state.value_3=value3[0]
-       st.session_state.value_4=value3[1]    
-     st.session_state.value_5=value4
-     st.session_state.value_6=value5
-     st.session_state.value_7=value6
-     st.session_state.value_8=value7
-     key_num+=1
-     with st.form(key=f"form1{key_num}") : 
-      co3,co4=st.columns(2)
-      co5,co6=st.columns(2)
-      co7,co8=st.columns(2)      
-      
-      name=co3.text_input(label="Cardholder Name",key="value_1")
-      
-      occu=co4.text_input(label="Designation",key="value_2")
 
-      phone1=co5.text_input(label="Mobile 1",key="value_3")
-      phone2=co6.text_input(label="Mobile 2",key="value_4")  
-  
-      mail=co7.text_input(label="Email",key="value_5")
-      web_site=co8.text_input(label="website Link",key="value_6")
-      address= st.text_input(label="Address",key="value_7")
-      company_name=st.text_input(label="Company Name",key="value_8")
-      click2=st.form_submit_button(label="Submit",on_click=save_sql, args=(name,occu,phone1,phone2,mail,web_site,address,company_name,result)) 
-
+if ch1==True and len(dp1)>0:
+  try:
+   st_data =folium_static(map1)
+  except :
+    st.write("") 
+st.subheader(":violet[Price Visualization]")
+co5,co6=st.columns(2)
+chart_type=co5.selectbox(label="select a chart type",options=["select a chart","pie chart","line chart",'scatter chart','bar chart'])
+X=co6.selectbox(label="select a value" ,options=['Name','property types',"country","season"])
+st.subheader(":blue[avaliablity Visualization]")
+co7,co8=st.columns(2)
+chart_type1=co7.selectbox(label="select a charttype",options=["select a chart",'scatter chart','bar chart',"line chart"])
+X1=co8.selectbox(label="select a value" ,options=['demand fluctuation in %','occupancy rates in %',"avaliablity 30",
+                                                  "avaliablity 60","avaliablity 90","avaliablity 365"]) 
+try:
+  price_charts(df1,chart_type,X)
+  avail_chart(df1,chart_type1,X1)
+except:
+  st.write("")   
